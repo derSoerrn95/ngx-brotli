@@ -23,8 +23,11 @@ jobs:
       - name: Get latest nginx:alpine digest
         id: check
         run: |
-          # Get current nginx:alpine digest
-          DIGEST=$(docker manifest inspect nginx:alpine 2>/dev/null | jq -r '.config.digest // .manifests[0].digest')
+          # Pull image first so output doesn't interfere with variable capture
+          docker pull nginx:alpine > /dev/null 2>&1
+
+          # Get current nginx:alpine digest (strip sha256: prefix to avoid output format issues)
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' nginx:alpine | sed 's/.*@sha256://')
           echo "nginx_digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
           # Get nginx version
