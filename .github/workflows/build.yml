@@ -1,0 +1,95 @@
+name: Build nginx with Brotli
+
+on:
+  schedule:
+    # Check daily at 06:00 UTC
+    - cron: '0 6 * * *'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      needs_build: ${{ steps.check.outputs.needs_build }}
+      nginx_version: ${{ steps.check.outputs.nginx_version }}
+      nginx_digest: ${{ steps.check.outputs.nginx_digest }}
+    steps:
+      - name: Get latest nginx:alpine digest
+        id: check
+        run: |
+          # Get current nginx:alpine digest
+          DIGEST=$(docker manifest inspect nginx:alpine 2>/dev/null | jq -r '.config.digest // .manifests[0].digest')
+          echo "nginx_digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+          # Get nginx version
+          NGINX_VERSION=$(docker run --rm nginx:alpine nginx -v 2>&1 | sed 's/.*nginx\///')
+          echo "nginx_version=${NGINX_VERSION}" >> "$GITHUB_OUTPUT"
+
+          # Check if we already built this digest
+          EXISTING_DIGEST=$(gh api "orgs/${{ github.repository_owner }}/packages/container/${GITHUB_REPOSITORY#*/}/versions" \
+            --jq '.[0].metadata.container.tags[]' 2>/dev/null | grep -F "nginx-${DIGEST}" || true)
+
+          if [ -z "$EXISTING_DIGEST" ]; then
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+            echo "New nginx:alpine digest detected: ${DIGEST}"
+          else
+            echo "needs_build=false" >> "$GITHUB_OUTPUT"
+            echo "Already up to date"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: check-update
+    if: needs.check-update.outputs.needs_build == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ needs.check-update.outputs.nginx_version }}
+            type=raw,value=nginx-${{ needs.check-update.outputs.nginx_digest }}
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image
+        run: |
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest nginx -V 2>&1 | head -5
+          echo "---"
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest nginx -V 2>&1 | grep -o 'brotli' && echo "Brotli module confirmed" || echo "WARNING: Brotli not found"
