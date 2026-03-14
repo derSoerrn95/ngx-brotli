@@ -30,8 +30,8 @@ jobs:
           DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' nginx:alpine | sed 's/.*@sha256://')
           echo "nginx_digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
-          # Get nginx version
-          NGINX_VERSION=$(docker run --rm nginx:alpine nginx -v 2>&1 | sed 's/.*nginx\///')
+          # Get nginx version (entrypoint scripts write to stdout, nginx -v writes to stderr)
+          NGINX_VERSION=$(docker run --rm --entrypoint nginx nginx:alpine -v 2>&1 | sed 's/.*nginx\///')
           echo "nginx_version=${NGINX_VERSION}" >> "$GITHUB_OUTPUT"
 
           # Check if we already built this digest
