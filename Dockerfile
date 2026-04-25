@@ -33,6 +33,8 @@ RUN NGINX_VER=$(nginx -v 2>&1 | sed 's/.*nginx\///') && \
 
 FROM nginx:${NGINX_VERSION}
 
+RUN apk add --no-cache inotify-tools
+
 # Copy compiled brotli modules
 RUN NGINX_VER=$(nginx -v 2>&1 | sed 's/.*nginx\///') && \
     mkdir -p /etc/nginx/modules
@@ -42,5 +44,11 @@ COPY --from=builder /tmp/nginx-*/objs/ngx_http_brotli_static_module.so /etc/ngin
 # Add module loading to nginx config
 RUN sed -i '1i load_module /etc/nginx/modules/ngx_http_brotli_filter_module.so;\nload_module /etc/nginx/modules/ngx_http_brotli_static_module.so;' /etc/nginx/nginx.conf
 
+# Auto-reload nginx when SSL files change on disk. Hooks into the official
+# /docker-entrypoint.d/ chain so ENTRYPOINT/CMD stay drop-in compatible.
+COPY cert-watch.sh    /usr/local/bin/cert-watch.sh
+COPY 40-cert-watch.sh /docker-entrypoint.d/40-cert-watch.sh
+RUN chmod +x /usr/local/bin/cert-watch.sh /docker-entrypoint.d/40-cert-watch.sh
+
 LABEL org.opencontainers.image.source="https://github.com/derSoerrn95/ngx-brotli"
-LABEL org.opencontainers.image.description="nginx:alpine with Brotli compression module"
+LABEL org.opencontainers.image.description="nginx:alpine with Brotli compression module and SSL cert auto-reload"
