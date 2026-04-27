@@ -96,3 +96,10 @@ jobs:
           docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest nginx -V 2>&1 | head -5
           echo "---"
           docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest nginx -V 2>&1 | grep -o 'brotli' && echo "Brotli module confirmed" || echo "WARNING: Brotli not found"
+
+      - name: Prune old image versions (keep last 7)
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ github.event.repository.name }}
+          package-type: container
+          min-versions-to-keep: 7
