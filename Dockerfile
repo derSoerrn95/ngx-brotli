@@ -1,4 +1,8 @@
-ARG NGINX_VERSION=alpine
+# alpine-slim drops njs, xslt, image-filter and geoip along with their
+# dependency trees (libgd, freetype, fontconfig, libjpeg, libpng, libxml2,
+# libxslt) — ~20 MB compressed, none of which this image uses. Same nginx
+# build, same entrypoint chain, same envsubst template support.
+ARG NGINX_VERSION=alpine-slim
 
 FROM nginx:${NGINX_VERSION} AS builder
 
@@ -33,11 +37,23 @@ RUN NGINX_VER=$(nginx -v 2>&1 | sed 's/.*nginx\///') && \
 
 FROM nginx:${NGINX_VERSION}
 
-RUN apk add --no-cache inotify-tools
-
-# Copy compiled brotli modules
-RUN NGINX_VER=$(nginx -v 2>&1 | sed 's/.*nginx\///') && \
+# Install the watcher's only runtime dependency, then strip what a running
+# nginx never touches. These files come from the base image's layers, so a
+# whiteout here shrinks the attack surface of the *container*, not the
+# download size of the image — parent-layer bytes can't be reclaimed.
+RUN apk add --no-cache inotify-tools && \
+    rm -f /usr/sbin/nginx-debug /usr/bin/scanelf && \
+    rm -f /sbin/apk /usr/lib/libapk.so.* && \
     mkdir -p /etc/nginx/modules
+
+# On removing apk: it stops an attacker with RCE from installing tooling.
+# /lib/apk/db/installed is deliberately kept so image scanners (trivy, grype)
+# can still enumerate packages — without it they report zero findings, which
+# reads as "clean" rather than "unknown".
+# Caveat: docker-entrypoint.d/10-listen-on-ipv6-by-default.sh shells out to
+# `apk manifest` to checksum the stock conf.d/default.conf. It now no-ops
+# (exits 0), so a *stock* default.conf no longer gets `listen [::]:80;`
+# added. Irrelevant if you mount your own config, which this image expects.
 COPY --from=builder /tmp/nginx-*/objs/ngx_http_brotli_filter_module.so /etc/nginx/modules/
 COPY --from=builder /tmp/nginx-*/objs/ngx_http_brotli_static_module.so /etc/nginx/modules/
 

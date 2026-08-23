@@ -11,6 +11,9 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Base image tag to track and build against. Must match the Dockerfile's
+  # NGINX_VERSION default, or we would watch one image and build from another.
+  NGINX_BASE: alpine-slim
 
 jobs:
   check-update:
@@ -39,24 +42,24 @@ jobs:
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
 
           # Pull image first so output doesn't interfere with variable capture
-          docker pull nginx:alpine > /dev/null 2>&1
+          docker pull "nginx:${NGINX_BASE}" > /dev/null 2>&1
 
-          # Get current nginx:alpine digest (strip sha256: prefix to avoid output format issues)
-          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' nginx:alpine | sed 's/.*@sha256://')
+          # Get current base digest (strip sha256: prefix to avoid output format issues)
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "nginx:${NGINX_BASE}" | sed 's/.*@sha256://')
           echo "nginx_digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
           # Get nginx version (entrypoint scripts write to stdout, nginx -v writes to stderr)
-          NGINX_VERSION=$(docker run --rm --entrypoint nginx nginx:alpine -v 2>&1 | sed 's/.*nginx\///')
+          NGINX_VERSION=$(docker run --rm --entrypoint nginx "nginx:${NGINX_BASE}" -v 2>&1 | sed 's/.*nginx\///')
           echo "nginx_version=${NGINX_VERSION}" >> "$GITHUB_OUTPUT"
 
           # Ask the registry whether we already published a build for this digest.
           # An unreachable registry falls through to a rebuild, which is the safe direction.
           if docker buildx imagetools inspect "${IMAGE}:nginx-${DIGEST}" > /dev/null 2>&1; then
             echo "needs_build=false" >> "$GITHUB_OUTPUT"
-            echo "Already up to date: nginx ${NGINX_VERSION} (${DIGEST})"
+            echo "Already up to date: nginx ${NGINX_VERSION} on ${NGINX_BASE} (${DIGEST})"
           else
             echo "needs_build=true" >> "$GITHUB_OUTPUT"
-            echo "New nginx:alpine digest detected: ${DIGEST} (nginx ${NGINX_VERSION})"
+            echo "New nginx:${NGINX_BASE} digest detected: ${DIGEST} (nginx ${NGINX_VERSION})"
           fi
 
   build:
@@ -97,6 +100,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            NGINX_VERSION=${{ env.NGINX_BASE }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -121,6 +126,20 @@ jobs:
           # load_module directives and fails on a missing or ABI-incompatible .so
           docker run --rm --entrypoint nginx "$IMAGE" -t
           echo "Brotli modules confirmed"
+          echo "---"
+
+          # The trimmed binaries must be gone, and the scanner database must not be
+          for gone in /sbin/apk /usr/sbin/nginx-debug /usr/bin/scanelf; do
+            if docker run --rm --entrypoint test "$IMAGE" -e "$gone"; then
+              echo "::error::${gone} still present, trim did not apply"
+              exit 1
+            fi
+          done
+          docker run --rm --entrypoint test "$IMAGE" -s /lib/apk/db/installed
+          echo "Trim confirmed, package database retained for scanners"
+          echo "---"
+
+          docker image inspect "$IMAGE" --format 'Image size: {{.Size}} bytes'
 
       - name: Prune old image versions (keep last 7)
         uses: actions/delete-package-versions@v5
