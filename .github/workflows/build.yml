@@ -107,16 +107,20 @@ jobs:
           IMAGE="${{ needs.check-update.outputs.image }}:latest"
           docker pull "$IMAGE"
 
-          NGINX_V=$(docker run --rm --entrypoint nginx "$IMAGE" -V 2>&1)
-          echo "$NGINX_V" | head -5
+          docker run --rm --entrypoint nginx "$IMAGE" -v
           echo "---"
 
-          if echo "$NGINX_V" | grep -q 'brotli'; then
-            echo "Brotli module confirmed"
-          else
-            echo "::error::Brotli module missing from the built image"
-            exit 1
-          fi
+          # Brotli is built as a dynamic module, so it never shows up in the
+          # stock binary's `nginx -V` output. Check that both modules shipped...
+          docker run --rm --entrypoint ls "$IMAGE" -l \
+            /etc/nginx/modules/ngx_http_brotli_filter_module.so \
+            /etc/nginx/modules/ngx_http_brotli_static_module.so
+          echo "---"
+
+          # ...and that nginx actually loads them: `nginx -t` processes the
+          # load_module directives and fails on a missing or ABI-incompatible .so
+          docker run --rm --entrypoint nginx "$IMAGE" -t
+          echo "Brotli modules confirmed"
 
       - name: Prune old image versions (keep last 7)
         uses: actions/delete-package-versions@v5
