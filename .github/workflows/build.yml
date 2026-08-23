@@ -15,14 +15,29 @@ env:
 jobs:
   check-update:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     outputs:
       needs_build: ${{ steps.check.outputs.needs_build }}
       nginx_version: ${{ steps.check.outputs.nginx_version }}
       nginx_digest: ${{ steps.check.outputs.nginx_digest }}
+      image: ${{ steps.check.outputs.image }}
     steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Get latest nginx:alpine digest
         id: check
         run: |
+          # Image references must be lowercase, github.repository keeps the owner's casing
+          IMAGE=$(echo "${REGISTRY}/${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
           # Pull image first so output doesn't interfere with variable capture
           docker pull nginx:alpine > /dev/null 2>&1
 
@@ -34,19 +49,15 @@ jobs:
           NGINX_VERSION=$(docker run --rm --entrypoint nginx nginx:alpine -v 2>&1 | sed 's/.*nginx\///')
           echo "nginx_version=${NGINX_VERSION}" >> "$GITHUB_OUTPUT"
 
-          # Check if we already built this digest
-          EXISTING_DIGEST=$(gh api "orgs/${{ github.repository_owner }}/packages/container/${GITHUB_REPOSITORY#*/}/versions" \
-            --jq '.[0].metadata.container.tags[]' 2>/dev/null | grep -F "nginx-${DIGEST}" || true)
-
-          if [ -z "$EXISTING_DIGEST" ]; then
-            echo "needs_build=true" >> "$GITHUB_OUTPUT"
-            echo "New nginx:alpine digest detected: ${DIGEST}"
-          else
+          # Ask the registry whether we already published a build for this digest.
+          # An unreachable registry falls through to a rebuild, which is the safe direction.
+          if docker buildx imagetools inspect "${IMAGE}:nginx-${DIGEST}" > /dev/null 2>&1; then
             echo "needs_build=false" >> "$GITHUB_OUTPUT"
-            echo "Already up to date"
+            echo "Already up to date: nginx ${NGINX_VERSION} (${DIGEST})"
+          else
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+            echo "New nginx:alpine digest detected: ${DIGEST} (nginx ${NGINX_VERSION})"
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build:
     needs: check-update
@@ -93,9 +104,19 @@ jobs:
 
       - name: Verify image
         run: |
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest nginx -V 2>&1 | head -5
+          IMAGE="${{ needs.check-update.outputs.image }}:latest"
+          docker pull "$IMAGE"
+
+          NGINX_V=$(docker run --rm --entrypoint nginx "$IMAGE" -V 2>&1)
+          echo "$NGINX_V" | head -5
           echo "---"
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest nginx -V 2>&1 | grep -o 'brotli' && echo "Brotli module confirmed" || echo "WARNING: Brotli not found"
+
+          if echo "$NGINX_V" | grep -q 'brotli'; then
+            echo "Brotli module confirmed"
+          else
+            echo "::error::Brotli module missing from the built image"
+            exit 1
+          fi
 
       - name: Prune old image versions (keep last 7)
         uses: actions/delete-package-versions@v5
@@ -103,3 +124,30 @@ jobs:
           package-name: ${{ github.event.repository.name }}
           package-type: container
           min-versions-to-keep: 7
+
+  keepalive:
+    # Scheduled workflows are auto-disabled after 60 days without repository
+    # activity. Scheduled runs don't count, so push an empty commit before we
+    # hit that window. GITHUB_TOKEN pushes never trigger workflow runs.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Push keepalive commit if repository is going stale
+        run: |
+          DAYS=$(( ( $(date +%s) - $(git log -1 --format=%ct) ) / 86400 ))
+          echo "Days since last commit: ${DAYS}"
+
+          if [ "$DAYS" -lt 45 ]; then
+            echo "Repository still active, nothing to do"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive to prevent scheduled workflow disablement [skip ci]"
+          git push
