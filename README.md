@@ -8,12 +8,34 @@ Rebuilt daily against the upstream base image and published to
 
 ## Tags
 
-| tag | meaning |
-| --- | --- |
-| `latest` | most recent build |
-| `1.31.4` | the nginx version in the image |
-| `nginx-<digest>` | the base image digest the build came from |
-| `sha-<commit>` | the commit that produced the image |
+Two tracks are built from the same Dockerfile:
+
+| tag | track | meaning |
+| --- | --- | --- |
+| `latest`, `mainline` | mainline | newest nginx release (1.31.x today) |
+| `stable` | stable | newest stable release (1.30.x today) |
+| `1.31.4`, `1.30.4` | both | the exact nginx version |
+| `nginx-<digest>` | both | the base image digest the build came from |
+| `sha-<commit>-<track>` | both | the commit that produced the image |
+
+Mainline gets fixes and features first but will move you across minor
+versions unattended (1.31 to 1.32). Stable only takes critical fixes. If the
+image auto-deploys without anyone looking at it, `stable` is the safer pin.
+Version-pinned tags like `1.31.4` never move.
+
+## How updates reach you
+
+Nothing here pins an nginx version. `nginx:alpine-slim` and
+`nginx:stable-alpine-slim` are floating tags that upstream repoints on every
+release, and the daily job compares their digests — so a new nginx release
+looks like a digest change and triggers a rebuild within 24 hours. The
+Dockerfile then reads the version out of the base image and fetches the
+matching source tarball, so the Brotli modules are always compiled against
+the exact nginx binary they will be loaded into.
+
+The same check catches Alpine package refreshes with no nginx bump, which is
+how an OpenSSL fix reaches you. Each run's summary says which of the two
+happened.
 
 ## Quick start
 
