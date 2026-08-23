@@ -34,7 +34,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get latest nginx:alpine digest
+      - name: Get latest nginx base image digest
         id: check
         run: |
           # Image references must be lowercase, github.repository keeps the owner's casing
@@ -137,6 +137,18 @@ jobs:
           done
           docker run --rm --entrypoint test "$IMAGE" -s /lib/apk/db/installed
           echo "Trim confirmed, package database retained for scanners"
+          echo "---"
+
+          # cert-watch.sh is plain POSIX sh, so the trim must not have taken out
+          # anything it shells out to. Checked here because nothing else would
+          # notice until a certificate renewal failed to trigger a reload.
+          docker run --rm --entrypoint test "$IMAGE" -x /usr/local/bin/cert-watch.sh
+          docker run --rm --entrypoint test "$IMAGE" -x /docker-entrypoint.d/40-cert-watch.sh
+          docker run --rm --entrypoint sh "$IMAGE" -c '
+            for cmd in inotifywait awk xargs dirname sort grep sed; do
+              command -v "$cmd" > /dev/null || { echo "::error::cert-watch needs $cmd, not in image"; exit 1; }
+            done'
+          echo "cert-watch toolchain confirmed"
           echo "---"
 
           docker image inspect "$IMAGE" --format 'Image size: {{.Size}} bytes'
