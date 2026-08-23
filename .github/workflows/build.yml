@@ -153,6 +153,61 @@ jobs:
 
           docker image inspect "$IMAGE" --format 'Image size: {{.Size}} bytes'
 
+      - name: Verify hardened runtime
+        run: |
+          IMAGE="${{ needs.check-update.outputs.image }}:latest"
+
+          # Turn brotli on so this exercises the module rather than just
+          # proving it loaded. The stock index.html is ~600 bytes.
+          cat > /tmp/brotli.conf <<'CONF'
+          server {
+              listen 80;
+              brotli on;
+              brotli_min_length 100;
+              location / { root /usr/share/nginx/html; index index.html; }
+          }
+          CONF
+
+          # The flags this image is built to run under: nothing writable except
+          # two tmpfs mounts, and no capability beyond binding a low port.
+          docker run -d --name hardened \
+            --read-only \
+            --cap-drop ALL \
+            --cap-add NET_BIND_SERVICE \
+            --tmpfs /tmp:mode=1777 \
+            --tmpfs /var/cache/nginx:uid=101,gid=101 \
+            -v /tmp/brotli.conf:/etc/nginx/conf.d/default.conf:ro \
+            -p 8080:80 \
+            "$IMAGE"
+
+          for i in $(seq 1 30); do
+            curl -fsS -o /dev/null http://localhost:8080/ && break
+            if [ "$i" -eq 30 ]; then
+              echo "::error::container never served a request"
+              docker logs hardened
+              exit 1
+            fi
+            sleep 1
+          done
+
+          RUNNING_UID=$(docker exec hardened id -u)
+          if [ "$RUNNING_UID" != "101" ]; then
+            echo "::error::running as uid ${RUNNING_UID}, expected 101"
+            exit 1
+          fi
+          echo "Serving on :80 as uid ${RUNNING_UID}, read-only rootfs, CAP_NET_BIND_SERVICE only"
+
+          ENC=$(curl -fsS -H 'Accept-Encoding: br' -o /dev/null -D - http://localhost:8080/ \
+                | tr -d '\r' | awk 'tolower($1) == "content-encoding:" { print $2 }')
+          if [ "$ENC" != "br" ]; then
+            echo "::error::expected a brotli-encoded response, got '${ENC:-none}'"
+            docker logs hardened
+            exit 1
+          fi
+          echo "Brotli compression confirmed end to end (content-encoding: br)"
+
+          docker rm -f hardened > /dev/null
+
       - name: Prune old image versions (keep last 7)
         uses: actions/delete-package-versions@v5
         with:
